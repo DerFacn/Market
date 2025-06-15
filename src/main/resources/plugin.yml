@@ -1,0 +1,17 @@
+name: Market
+version: '${project.version}'
+main: com.derfacn.market.Market
+api-version: '1.21'
+commands:
+  sell:
+    description: Продати предмет
+    usage: /sell <ціна>
+  market:
+    description: Відкрити маркет
+    usage: /market
+  balance:
+    description: Управління балансом
+    usage: /balance <add|check|take>
+  sales:
+    description: Передивитись виставлені предмети
+    usage: /sales
