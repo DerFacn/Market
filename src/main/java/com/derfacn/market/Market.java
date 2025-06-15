@@ -162,7 +162,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                 int balance = 0;
                 if (rs.next()) balance = rs.getInt("amount");
                 if (balance > 0) {
-                    player.getInventory().addItem(new ItemStack(Material.EMERALD, balance));
+                    giveCarefully(player, new ItemStack(Material.EMERALD, balance));
                     PreparedStatement update = connection.prepareStatement("UPDATE balance SET amount = 0 WHERE player = ?");
                     update.setString(1, player.getName().toLowerCase());
                     update.executeUpdate();
@@ -230,7 +230,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                         stmt2.close();
                         rs2.close();
 
-                        player.getInventory().addItem(new ItemStack(Material.EMERALD, amount));
+                        giveCarefully(player, new ItemStack(Material.EMERALD, amount));
                         player.sendMessage(plain("Ти забрав " + amount + " ізумрудів з балансу. Баланс: " + currentBalance, NamedTextColor.GREEN));
                     } catch (SQLException e) {
                         e.printStackTrace();
@@ -583,9 +583,6 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     ItemStack dbItem = BukkitObjectSerializer.bytesToItemStack(rs.getBytes("item"));
 
                     // Market: покупка
-                    // 1. Getting balance
-                    // 2. If not enough -> counting emeralds in inventory
-                    // 3. If not enough -> no item
                     boolean purchaseSuccessful = false;
 
                     // Firstly, trying to withdraw from balance
@@ -602,7 +599,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     }
 
                     if (purchaseSuccessful) {
-                        player.getInventory().addItem(dbItem);
+                        giveCarefully(player, dbItem);
 
                         if (seller != null) {
                             PreparedStatement balanceStmt = connection.prepareStatement(
@@ -660,7 +657,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
                 if (rs.next()) {
                     ItemStack dbItem = BukkitObjectSerializer.bytesToItemStack(rs.getBytes("item"));
-                    player.getInventory().addItem(dbItem);
+                    giveCarefully(player, dbItem);
 
                     PreparedStatement del = connection.prepareStatement("DELETE FROM items WHERE id = ?");
                     del.setInt(1, clickedId);
@@ -678,6 +675,17 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                 player.sendMessage(Component.text("Помилка при обробці дії").color(NamedTextColor.RED));
                 e.printStackTrace();
             }
+        }
+    }
+
+    public void giveCarefully(Player player, ItemStack items) {
+        HashMap<Integer, ItemStack> leftovers = player.getInventory().addItem(items);
+
+        if (!leftovers.isEmpty()) {
+            for (ItemStack item : leftovers.values()) {
+                player.getWorld().dropItemNaturally(player.getLocation(), item);
+            }
+            player.sendMessage(plain("Інвентар був повний, предмет(и) скинуто під ноги.", NamedTextColor.YELLOW));
         }
     }
 
