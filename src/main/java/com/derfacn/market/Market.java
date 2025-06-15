@@ -521,7 +521,6 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         if (!(human instanceof Player player)) return;
 
         String title = event.getView().getTitle();
-        String playerName = player.getName().toLowerCase();
         boolean isMarket = title.contains(MARKET_TITLE);
         boolean isSales = title.contains(SALES_TITLE);
 
@@ -534,7 +533,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
         NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
 
-        // Pages logics
+        // Pages buttons
         if (clicked.getItemMeta().getPersistentDataContainer().has(pageKey, PersistentDataType.STRING)) {
             if (Objects.equals(clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING), "previousPage")) {
                 if (isMarket) {
@@ -558,6 +557,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             return;
         }
 
+        // Refresh button
         if (clicked.getItemMeta().getPersistentDataContainer().has(refreshKey, PersistentDataType.STRING)) {
             openMarketGUI(player, player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0);
             return;
@@ -583,8 +583,25 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     ItemStack dbItem = BukkitObjectSerializer.bytesToItemStack(rs.getBytes("item"));
 
                     // Market: покупка
-                    if (countEmeralds(player) >= price) {
+                    // 1. Getting balance
+                    // 2. If not enough -> counting emeralds in inventory
+                    // 3. If not enough -> no item
+                    boolean purchaseSuccessful = false;
+
+                    // Firstly, trying to withdraw from balance
+                    if (getBalance(player) >= price) {
+                        if (withdrawBalance(player, price)) {
+                            purchaseSuccessful = true;
+                        }
+                    }
+
+                    // If not withdrew, then take from inventory
+                    if (!purchaseSuccessful && countEmeralds(player) >= price) {
                         removeEmeralds(player, price);
+                        purchaseSuccessful = true;
+                    }
+
+                    if (purchaseSuccessful) {
                         player.getInventory().addItem(dbItem);
 
                         if (seller != null) {
@@ -596,36 +613,36 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                             balanceStmt.setInt(2, price);
                             balanceStmt.executeUpdate();
                             balanceStmt.close();
+
+                            PreparedStatement del = connection.prepareStatement("DELETE FROM items WHERE id = ?");
+                            del.setInt(1, clickedId);
+                            del.executeUpdate();
+                            del.close();
+
+                            player.sendMessage(Component.text("Ви купили предмет за " + price + " ізумрудів").color(NamedTextColor.GREEN));
+
+                            // Повідомлення продавцю
+                            String translationKey = dbItem.getType().translationKey();
+                            Component translatedItemName = Component.translatable(translationKey);
+
+                            sendMessageToPlayerByLowercaseName(seller, translatedItemName
+                                    .append(Component.text(" було продано!"))
+                                    .color(NamedTextColor.GREEN)
+                                    .decorate(TextDecoration.ITALIC)
+                            );
+
+                            player.closeInventory();
+                            openMarketGUI(player, player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0);
                         }
-
-                        PreparedStatement del = connection.prepareStatement("DELETE FROM items WHERE id = ?");
-                        del.setInt(1, clickedId);
-                        del.executeUpdate();
-
-                        player.sendMessage(Component.text("Ви купили предмет за " + price + " ізумрудів").color(NamedTextColor.GREEN));
-
-                        String translationKey = dbItem.getType().translationKey();
-                        Component translatedItemName = Component.translatable(translationKey);
-
-                        sendMessageToPlayerByLowercaseName(seller, translatedItemName
-                                .append(Component.text(" було продано!"))
-                                .color(NamedTextColor.GREEN)
-                                .decorate(TextDecoration.ITALIC)
-                        );
-
-                        del.close();
-
-                        player.closeInventory();
-                        openMarketGUI(player, player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0);
                     } else {
-                        player.sendMessage(Component.text("Недостатньо ізумрудів").color(NamedTextColor.RED));
+                       player.sendMessage(plain("Недостатньо ізумрудів", NamedTextColor.RED));
                     }
                 } else {
                     player.sendMessage(Component.text("Цей предмет вже куплено або знято").color(NamedTextColor.RED));
                 }
 
                 stmt.close();
-
+                rs.close();
             } catch (Exception e) {
                 player.sendMessage(Component.text("Помилка при обробці дії").color(NamedTextColor.RED));
                 e.printStackTrace();
@@ -670,6 +687,57 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             if (item != null && item.getType() == Material.EMERALD) total += item.getAmount();
         }
         return total;
+    }
+
+    public int getBalance(Player player) {
+        int balance = 0;
+        String playerName = player.getName().toLowerCase();
+        try {
+            PreparedStatement stmt = connection.prepareStatement("SELECT amount FROM balance WHERE player = ?");
+            stmt.setString(1, playerName);
+            ResultSet rs = stmt.executeQuery();
+
+            if (rs.next()) {
+                balance = rs.getInt("amount");
+            }
+            return balance;
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return 0;
+        }
+    }
+
+    public boolean withdrawBalance(Player player, @Nullable Integer amount) {
+        String playerName = player.getName().toLowerCase();
+
+        if (amount != null) {
+            try {
+                PreparedStatement stmt = connection.prepareStatement(
+                        "INSERT INTO balance (player, amount) VALUES (?, ?) " +
+                                "ON CONFLICT(player) DO UPDATE SET amount = amount - excluded.amount");
+                stmt.setString(1, playerName);
+                stmt.setInt(2, amount);
+                stmt.executeUpdate();
+                stmt.close();
+
+                return true;
+            } catch (SQLException e) {
+                e.printStackTrace();
+                return false;
+            }
+        } else {
+            try {
+                PreparedStatement stmt = connection.prepareStatement("UPDATE balance SET amount = 0 WHERE player = ?");
+                stmt.setString(1, playerName);
+                stmt.executeUpdate();
+                stmt.close();
+
+                return true;
+            } catch (SQLException e) {
+                e.printStackTrace();
+                return false;
+            }
+        }
     }
 
     public void removeEmeralds(Player player, int amount) {
