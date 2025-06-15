@@ -1,6 +1,7 @@
 package com.derfacn.market;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.tree.LiteralCommandNode;
@@ -44,23 +45,54 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
     @Override
     public void onEnable() {
-//        getServer().getPluginManager().registerEvents(new PlayerJoinListener(connection), this);
         getServer().getPluginManager().registerEvents(this, this);
 
-//        LiteralArgumentBuilder newSellCommand = SellCommand.createCommand(connection);  // Creating new_sell command
-//
-//        LiteralCommandNode<CommandSourceStack> buildCommand = newSellCommand.build();
-//        this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
-//            commands.registrar().register(buildCommand);
-//        });
-
 //      Building and registering commands
-        LiteralArgumentBuilder<CommandSourceStack> salesCommand = Commands.literal("sales").executes(ctx -> {
-            CommandSender sender = ctx.getSource().getSender();
-            if (!(sender instanceof Player player)) return 0;
-            openSalesGUI(player, 0);
-            return 1;
-        });
+        LiteralArgumentBuilder<CommandSourceStack> salesCommand = Commands.literal("sales")
+                .executes(ctx -> {
+                    CommandSender sender = ctx.getSource().getSender();
+                    if (!(sender instanceof Player player)) return 0;
+                    openSalesGUI(player, 0);
+                    return 1;
+                });
+
+        LiteralArgumentBuilder<CommandSourceStack> marketCommand = Commands.literal("market")
+                .executes(ctx -> {
+                    CommandSender sender = ctx.getSource().getSender();
+                    if (!(sender instanceof Player player)) return 0;
+                    openMarketGUI(player, 0);
+                    return 1;
+                });
+
+        RequiredArgumentBuilder<CommandSourceStack, String> marketPlayerArgument = Commands.argument("playerName", StringArgumentType.string())
+                .suggests((ctx, builder) -> {
+                    try {
+                        Set<String> sellers = new HashSet<>();
+
+                        PreparedStatement stmt = connection.prepareStatement("SELECT DISTINCT seller FROM items");
+                        ResultSet rs = stmt.executeQuery();
+
+                        while (rs.next()) {
+                            sellers.add(rs.getString("seller"));
+                        }
+
+                        for (String seller : sellers) {
+                            builder.suggest(seller);
+                        }
+                        rs.close();
+                        stmt.close();
+                    } catch (SQLException e) {
+                        e.printStackTrace();
+                    }
+                    return builder.buildFuture();
+                })
+                .executes(ctx -> {
+                    CommandSender sender = ctx.getSource().getSender();
+                    if (!(sender instanceof Player player)) return 0;
+                    String playerName = ctx.getArgument("playerName", String.class);
+                    openMarketGUI(player, 0, playerName);
+                    return 1;
+                });
 
         LiteralArgumentBuilder<CommandSourceStack> addCommand = Commands.literal("add").executes(ctx -> {
             CommandSender sender = ctx.getSource().getSender();
@@ -268,16 +300,19 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         balanceCommandTree.then(addCommand);
         balanceCommandTree.then(takeCommand);
 
+        marketCommand.then(marketPlayerArgument);
+
         LiteralCommandNode<CommandSourceStack> builtCommand = balanceCommandTree.build();
         LiteralCommandNode<CommandSourceStack> builtSalesCommand = salesCommand.build();
+        LiteralCommandNode<CommandSourceStack> builtMarketCommand = marketCommand.build();
 
         this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
             commands.registrar().register(builtCommand);
             commands.registrar().register(builtSalesCommand);
+            commands.registrar().register(builtMarketCommand);
         });
 
         getCommand("sell").setExecutor(this);
-        getCommand("market").setExecutor(this);
 
         try {
             File dbFile = new File(getDataFolder(), "market.db");
@@ -339,180 +374,9 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     e.printStackTrace();
                 }
             }
-
-            case "market" -> openMarketGUI(player, 0);
         }
 
         return true;
-    }
-
-    public void openMarketGUI(Player player, int page) {
-        try {
-            List<MarketItem> marketItems = new ArrayList<>();
-            PreparedStatement stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items LIMIT ? OFFSET ?");
-            stmt.setInt(1, ITEMS_PER_PAGE);
-            stmt.setInt(2, page * ITEMS_PER_PAGE);
-            ResultSet rs = stmt.executeQuery();
-
-            while (rs.next()) {
-                int id = rs.getInt("id");
-                byte[] data = rs.getBytes("item");
-                String seller = rs.getString("seller");
-                int price = rs.getInt("price");
-                ItemStack item = BukkitObjectSerializer.bytesToItemStack(data);
-
-                ItemMeta meta = item.getItemMeta();
-
-                // Додай ID предмета в PersistentDataContainer
-                NamespacedKey key = new NamespacedKey(this, "market_id");
-                meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, id);
-
-                meta.lore(List.of(
-                        plain("Ціна: " + price + " ізумрудів", NamedTextColor.YELLOW),
-                        plain("Продавець: " + seller, NamedTextColor.GRAY),
-                        plain("ЛКМ щоб купити", NamedTextColor.GREEN)
-                ));
-                item.setItemMeta(meta);
-
-                marketItems.add(new MarketItem(id, item, seller, price));
-            }
-
-            int currentPage = page + 1;
-
-            PreparedStatement countStmt = connection.prepareStatement(
-                    "SELECT CEIL(COUNT(*) / ?) AS total_pages FROM items"
-            );
-            countStmt.setDouble(1, ITEMS_PER_PAGE);
-            ResultSet countRs = countStmt.executeQuery();
-
-            int totalPages = 1;
-
-            if (countRs.next()) {
-                totalPages = countRs.getInt("total_pages");
-            }
-
-            Component guiName = Component.text(MARKET_TITLE, NamedTextColor.DARK_PURPLE)
-                    .append(Component.text(" (" + currentPage + "/" + totalPages + ")"));
-
-            Inventory gui = Bukkit.createInventory(null, 54, guiName);
-            for (int i = 0; i < marketItems.size(); i++) {
-                gui.setItem(i, marketItems.get(i).item());
-            }
-
-            // Кнопки пагінації
-            NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
-            NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
-
-            if (page > 0) {
-                ItemStack back = new ItemStack(Material.PAPER);
-
-                ItemMeta meta = back.getItemMeta();
-                meta.displayName(plain("Попередня сторінка", NamedTextColor.YELLOW));
-                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "previousPage");
-                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
-                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
-                back.setItemMeta(meta);
-                gui.setItem(46, back);
-            }
-
-            if (marketItems.size() == ITEMS_PER_PAGE) {
-                ItemStack next = new ItemStack(Material.PAPER);
-                ItemMeta meta = next.getItemMeta();
-                meta.displayName(plain("Наступна сторінка", NamedTextColor.YELLOW));
-                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "nextPage");
-                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
-                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
-                next.setItemMeta(meta);
-                gui.setItem(52, next);
-            }
-
-            ItemStack refresh = new ItemStack(Material.CLOCK);
-            ItemMeta refreshMeta = refresh.getItemMeta();
-            refreshMeta.displayName(plain("Оновити сторінку", NamedTextColor.YELLOW));
-            refreshMeta.getPersistentDataContainer().set(refreshKey, PersistentDataType.STRING, "refreshKey");
-            refreshMeta.addEnchant(Enchantment.UNBREAKING, 1, true);
-            refreshMeta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
-            refresh.setItemMeta(refreshMeta);
-            gui.setItem(49, refresh);
-
-            player.openInventory(gui);
-            player.setMetadata("market_page", new org.bukkit.metadata.FixedMetadataValue(this, page));
-
-            stmt.close();
-            countStmt.close();
-        } catch (Exception e) {
-            player.sendMessage(Component.text("Не вдалося відкрити маркет").color(NamedTextColor.RED));
-            e.printStackTrace();
-        }
-    }
-
-    public void openSalesGUI(Player player, int page) {
-        try {
-            List<SalesItem> salesItems = new ArrayList<>();
-            String seller = player.getName().toLowerCase();
-            PreparedStatement stmt = connection.prepareStatement("SELECT id, item, price FROM items WHERE seller = ? LIMIT ? OFFSET ?");
-            stmt.setString(1, seller);
-            stmt.setInt(2, ITEMS_PER_PAGE);
-            stmt.setInt(3, page * ITEMS_PER_PAGE);
-            ResultSet rs = stmt.executeQuery();
-
-            while (rs.next()) {
-                int id = rs.getInt("id");
-                byte[] data = rs.getBytes("item");
-                int price = rs.getInt("price");
-                ItemStack item = BukkitObjectSerializer.bytesToItemStack(data);
-
-                ItemMeta meta = item.getItemMeta();
-
-                NamespacedKey key = new NamespacedKey(this, "sales_id");
-                meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, id);
-
-                meta.lore(List.of(
-                        plain("Ціна: " + price + " ізумрудів", NamedTextColor.YELLOW),
-                        plain("ЛКМ - зняти з продажу", NamedTextColor.RED)
-                ));
-                item.setItemMeta(meta);
-
-                salesItems.add(new SalesItem(id, item, price));
-            }
-
-            Inventory gui = Bukkit.createInventory(null, 54, Component.text(SALES_TITLE, NamedTextColor.DARK_PURPLE));
-            for (int i = 0; i < salesItems.size(); i++) {
-                gui.setItem(i, salesItems.get(i).item());
-            }
-
-            NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
-
-            if (page > 0) {
-                ItemStack back = new ItemStack(Material.PAPER);
-                ItemMeta meta = back.getItemMeta();
-                meta.displayName(plain("Попередня сторінка", NamedTextColor.YELLOW));
-                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "previousPage");
-                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
-                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
-                back.setItemMeta(meta);
-                gui.setItem(46, back);
-            }
-
-            if (salesItems.size() == ITEMS_PER_PAGE) {
-                ItemStack next = new ItemStack(Material.PAPER);
-                ItemMeta meta = next.getItemMeta();
-                meta.displayName(plain("Наступна сторінка", NamedTextColor.YELLOW));
-                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "nextPage");
-                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
-                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
-                next.setItemMeta(meta);
-                gui.setItem(52, next);
-            }
-
-            stmt.close();
-
-            player.openInventory(gui);
-            player.setMetadata("sales_page", new org.bukkit.metadata.FixedMetadataValue(this, page));
-        } catch (Exception e) {
-            player.sendMessage(Component.text("Не вдалося відкрити продажі").color(NamedTextColor.RED));
-            e.printStackTrace();
-        }
     }
 
     @EventHandler
@@ -532,13 +396,19 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
         NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
         NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
+        NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
 
         // Pages buttons
         if (clicked.getItemMeta().getPersistentDataContainer().has(pageKey, PersistentDataType.STRING)) {
             if (Objects.equals(clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING), "previousPage")) {
                 if (isMarket) {
                     int currentPage = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
-                    openMarketGUI(player, currentPage - 1);
+                    if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
+                        String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
+                        openMarketGUI(player, currentPage - 1, playerName);
+                    } else {
+                        openMarketGUI(player, currentPage - 1);
+                    }
                 }
                 else {
                     int currentPage = player.hasMetadata("sales_page") ? player.getMetadata("sales_page").get(0).asInt() : 0;
@@ -547,7 +417,12 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             } else if (Objects.equals(clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING), "nextPage")) {
                 if (isMarket) {
                     int currentPage = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
-                    openMarketGUI(player, currentPage + 1);
+                    if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
+                        String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
+                        openMarketGUI(player, currentPage + 1, playerName);
+                    } else {
+                        openMarketGUI(player, currentPage + 1);
+                    }
                 }
                 else {
                     int currentPage = player.hasMetadata("sales_page") ? player.getMetadata("sales_page").get(0).asInt() : 0;
@@ -559,7 +434,13 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
         // Refresh button
         if (clicked.getItemMeta().getPersistentDataContainer().has(refreshKey, PersistentDataType.STRING)) {
-            openMarketGUI(player, player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0);
+            int page = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
+            if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
+                String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
+                openMarketGUI(player, page, playerName);
+            } else {
+                openMarketGUI(player, page);
+            }
             return;
         }
 
@@ -675,6 +556,210 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                 player.sendMessage(Component.text("Помилка при обробці дії").color(NamedTextColor.RED));
                 e.printStackTrace();
             }
+        }
+    }
+
+    public void openMarketGUI(Player player, int page) {
+        openMarketGUI(player, page, null);
+    }
+
+    public void openMarketGUI(@NotNull Player player, int page, @Nullable String playerName) {
+        try {
+            List<MarketItem> marketItems = new ArrayList<>();
+            PreparedStatement stmt;
+            if (playerName != null) {
+                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items WHERE seller = ? LIMIT ? OFFSET ?");
+                stmt.setString(1, playerName);
+                stmt.setInt(2, ITEMS_PER_PAGE);
+                stmt.setInt(3, page * ITEMS_PER_PAGE);
+            } else {
+                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items LIMIT ? OFFSET ?");
+                stmt.setInt(1, ITEMS_PER_PAGE);
+                stmt.setInt(2, page * ITEMS_PER_PAGE);
+            }
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                int id = rs.getInt("id");
+                byte[] data = rs.getBytes("item");
+                String seller = rs.getString("seller");
+                int price = rs.getInt("price");
+                ItemStack item = BukkitObjectSerializer.bytesToItemStack(data);
+
+                ItemMeta meta = item.getItemMeta();
+
+                NamespacedKey key = new NamespacedKey(this, "market_id");
+                meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, id);
+
+                meta.lore(List.of(
+                        plain("Ціна: " + price + " ізумрудів", NamedTextColor.YELLOW),
+                        plain("Продавець: " + seller, NamedTextColor.GRAY),
+                        plain("ЛКМ щоб купити", NamedTextColor.GREEN)
+                ));
+                item.setItemMeta(meta);
+
+                marketItems.add(new MarketItem(id, item, seller, price));
+            }
+
+            int currentPage = page + 1;
+            int totalPages = 1;
+
+            PreparedStatement countStmt;
+            if (playerName != null) {
+                 countStmt = connection.prepareStatement(
+                         "SELECT CEIL(COUNT(*) / ?) AS total_pages FROM items WHERE seller = ?"
+                 );
+                 countStmt.setDouble(1, ITEMS_PER_PAGE);
+                 countStmt.setString(2, playerName);
+            } else {
+                countStmt = connection.prepareStatement(
+                        "SELECT CEIL(COUNT(*) / ?) AS total_pages FROM items"
+                );
+                countStmt.setDouble(1, ITEMS_PER_PAGE);
+            }
+
+            ResultSet countRs = countStmt.executeQuery();
+
+            if (countRs.next()) {
+                totalPages = countRs.getInt("total_pages");
+            }
+
+            // Creating GUI Name
+            Component guiName = Component.text(MARKET_TITLE, NamedTextColor.DARK_PURPLE);
+            if (playerName != null) {
+                guiName = guiName.append(Component.text(" (" + playerName + ")", NamedTextColor.DARK_PURPLE));
+            }
+            guiName = guiName.append(Component.text(" (" + currentPage + "/" + totalPages + ")"));
+
+            Inventory gui = Bukkit.createInventory(null, 54, guiName);
+            for (int i = 0; i < marketItems.size(); i++) {
+                gui.setItem(i, marketItems.get(i).item());
+            }
+
+            // Pagination buttons
+            NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
+            NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
+            NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
+
+            if (page > 0) {
+                ItemStack back = new ItemStack(Material.PAPER);
+
+                ItemMeta meta = back.getItemMeta();
+                meta.displayName(plain("Попередня сторінка", NamedTextColor.YELLOW));
+                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "previousPage");
+                if (playerName != null) {
+                    meta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+                }
+                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+                back.setItemMeta(meta);
+                gui.setItem(46, back);
+            }
+
+            if (marketItems.size() == ITEMS_PER_PAGE) {
+                ItemStack next = new ItemStack(Material.PAPER);
+                ItemMeta meta = next.getItemMeta();
+                meta.displayName(plain("Наступна сторінка", NamedTextColor.YELLOW));
+                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "nextPage");
+                if (playerName != null) {
+                    meta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+                }
+                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+                next.setItemMeta(meta);
+                gui.setItem(52, next);
+            }
+
+            ItemStack refresh = new ItemStack(Material.CLOCK);
+            ItemMeta refreshMeta = refresh.getItemMeta();
+            refreshMeta.displayName(plain("Оновити сторінку", NamedTextColor.YELLOW));
+            refreshMeta.getPersistentDataContainer().set(refreshKey, PersistentDataType.STRING, "refreshKey");
+            if (playerName != null) {
+                refreshMeta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+            }
+            refreshMeta.addEnchant(Enchantment.UNBREAKING, 1, true);
+            refreshMeta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+            refresh.setItemMeta(refreshMeta);
+            gui.setItem(49, refresh);
+
+            player.openInventory(gui);
+            player.setMetadata("market_page", new org.bukkit.metadata.FixedMetadataValue(this, page));
+
+            stmt.close();
+            countStmt.close();
+            countRs.close();
+        } catch (Exception e) {
+            player.sendMessage(Component.text("Не вдалося відкрити маркет").color(NamedTextColor.RED));
+            e.printStackTrace();
+        }
+    }
+
+    public void openSalesGUI(Player player, int page) {
+        try {
+            List<SalesItem> salesItems = new ArrayList<>();
+            String seller = player.getName().toLowerCase();
+            PreparedStatement stmt = connection.prepareStatement("SELECT id, item, price FROM items WHERE seller = ? LIMIT ? OFFSET ?");
+            stmt.setString(1, seller);
+            stmt.setInt(2, ITEMS_PER_PAGE);
+            stmt.setInt(3, page * ITEMS_PER_PAGE);
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                int id = rs.getInt("id");
+                byte[] data = rs.getBytes("item");
+                int price = rs.getInt("price");
+                ItemStack item = BukkitObjectSerializer.bytesToItemStack(data);
+
+                ItemMeta meta = item.getItemMeta();
+
+                NamespacedKey key = new NamespacedKey(this, "sales_id");
+                meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, id);
+
+                meta.lore(List.of(
+                        plain("Ціна: " + price + " ізумрудів", NamedTextColor.YELLOW),
+                        plain("ЛКМ - зняти з продажу", NamedTextColor.RED)
+                ));
+                item.setItemMeta(meta);
+
+                salesItems.add(new SalesItem(id, item, price));
+            }
+
+            Inventory gui = Bukkit.createInventory(null, 54, Component.text(SALES_TITLE, NamedTextColor.DARK_PURPLE));
+            for (int i = 0; i < salesItems.size(); i++) {
+                gui.setItem(i, salesItems.get(i).item());
+            }
+
+            NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
+
+            if (page > 0) {
+                ItemStack back = new ItemStack(Material.PAPER);
+                ItemMeta meta = back.getItemMeta();
+                meta.displayName(plain("Попередня сторінка", NamedTextColor.YELLOW));
+                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "previousPage");
+                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+                back.setItemMeta(meta);
+                gui.setItem(46, back);
+            }
+
+            if (salesItems.size() == ITEMS_PER_PAGE) {
+                ItemStack next = new ItemStack(Material.PAPER);
+                ItemMeta meta = next.getItemMeta();
+                meta.displayName(plain("Наступна сторінка", NamedTextColor.YELLOW));
+                meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "nextPage");
+                meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+                meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+                next.setItemMeta(meta);
+                gui.setItem(52, next);
+            }
+
+            stmt.close();
+
+            player.openInventory(gui);
+            player.setMetadata("sales_page", new org.bukkit.metadata.FixedMetadataValue(this, page));
+        } catch (Exception e) {
+            player.sendMessage(Component.text("Не вдалося відкрити продажі").color(NamedTextColor.RED));
+            e.printStackTrace();
         }
     }
 
