@@ -26,6 +26,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
@@ -342,6 +343,25 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
                             Integer amount = ctx.getArgument("amount", Integer.class);
                             String playerName = ctx.getArgument("playerName", String.class);
+
+                            try {
+                                PreparedStatement stmt1 = connection.prepareStatement("SELECT player FROM balance WHERE player = ? LIMIT 1");
+                                stmt1.setString(1, playerName);
+                                ResultSet rs = stmt1.executeQuery();
+
+                                if (!rs.next()) {
+                                    player.sendMessage(Component.text("Такого гравця не існує!", NamedTextColor.RED));
+                                    return 1;
+                                }
+
+                                stmt1.close();
+                                rs.close();
+                            } catch (SQLException e) {
+                                e.printStackTrace();
+                                player.sendMessage(Component.text("Помилка під час запиту!", NamedTextColor.RED));
+                                return 1;
+                            }
+
                             boolean sendSuccessful = false;
 
                             try {
@@ -467,6 +487,23 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         }
 
         return true;
+    }
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        String playerName = event.getPlayer().getName().toLowerCase();
+
+        try {
+            PreparedStatement stmt = connection.prepareStatement("INSERT INTO balance (player, amount) " +
+                    "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM balance WHERE player = ?)");
+            stmt.setString(1, playerName);
+            stmt.setInt(2, 0);
+            stmt.setString(3, playerName);
+            stmt.executeUpdate();
+            stmt.close();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     @EventHandler
