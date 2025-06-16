@@ -1,5 +1,7 @@
 package com.derfacn.market;
 
+//import com.derfacn.market.orders.Orders;
+//import com.derfacn.market.orders.OrdersListener;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -42,10 +44,27 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
     private final int ITEMS_PER_PAGE = 45;
     private final String MARKET_TITLE = "Маркет";
     private final String SALES_TITLE = "Мої товари";
+//    private final String ORDERS_TITLE = "Orders";
 
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
+
+        try {
+            File dbFile = new File(getDataFolder(), "market.db");
+            if (!getDataFolder().exists()) getDataFolder().mkdirs();
+            connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
+            try (Statement stmt = connection.createStatement()) {
+                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, item BLOB, seller TEXT, price INTEGER)");
+                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balance (player VARCHAR(32) PRIMARY KEY, amount INT NOT NULL)");
+                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT, item TEXT, " +
+                        "count INTEGER, price INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, days INTEGER)");
+                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS deliveries (customer VARCHAR(32) PRIMARY KEY, deliverer TEXT, item TEXT, count INTEGER)");
+            }
+        } catch (SQLException e) {
+            getLogger().log(Level.SEVERE, "Не вдалося підключитись до бази даних", e);
+        }
 
 //      Building and registering commands
         LiteralArgumentBuilder<CommandSourceStack> salesCommand = Commands.literal("sales")
@@ -294,6 +313,78 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             return 1;
         });
 
+        RequiredArgumentBuilder<CommandSourceStack, String> sendPlayerArgument = Commands.argument("playerName", StringArgumentType.string())
+                .suggests((ctx, builder) -> {
+                    try {
+                        Set<String> sellers = new HashSet<>();
+
+                        PreparedStatement stmt = connection.prepareStatement("SELECT DISTINCT player FROM balance");
+                        ResultSet rs = stmt.executeQuery();
+
+                        while (rs.next()) {
+                            sellers.add(rs.getString("player"));
+                        }
+
+                        for (String seller : sellers) {
+                            builder.suggest(seller);
+                        }
+                        rs.close();
+                        stmt.close();
+                    } catch (SQLException e) {
+                        e.printStackTrace();
+                    }
+                    return builder.buildFuture();
+                })
+                .then(Commands.argument("amount", IntegerArgumentType.integer(1))
+                        .executes(ctx -> {
+                            CommandSender sender = ctx.getSource().getSender();
+                            if (!(sender instanceof Player player)) return 0;
+
+                            Integer amount = ctx.getArgument("amount", Integer.class);
+                            String playerName = ctx.getArgument("playerName", String.class);
+                            boolean sendSuccessful = false;
+
+                            try {
+                                if (getBalance(player) >= amount) {
+                                    if (withdrawBalance( player, amount)) {
+                                        sendSuccessful = true;
+                                    }
+                                }
+
+                                if (!sendSuccessful && (countEmeralds(player) >= amount)) {
+                                    removeEmeralds(player, amount);
+                                }
+
+                                if (sendSuccessful) {
+                                    PreparedStatement stmt = connection.prepareStatement(
+                                            "INSERT INTO balance (player, amount) VALUES (?, ?) " +
+                                                    "ON CONFLICT(player) DO UPDATE SET amount = amount + excluded.amount"
+                                    );
+                                    stmt.setString(1, playerName);
+                                    stmt.setInt(2, amount);
+                                    stmt.executeUpdate();
+                                    stmt.close();
+                                    player.sendMessage(Component.text("Успішно надіслано " + amount + " ізумрудів гравцю " + playerName, NamedTextColor.GREEN));
+                                    sendMessageToPlayerByLowercaseName(
+                                            playerName,
+                                            Component.text(player.getName().toLowerCase() + " надіслав вам ", NamedTextColor.GREEN)
+                                                    .append(Component.text(amount + " ізумрудів", NamedTextColor.GOLD))
+                                                    .append(Component.text("!", NamedTextColor.GREEN))
+                                    );
+                                } else {
+                                    player.sendMessage(Component.text("Недостатньо ізумрудів. Перевірте свій баланс / інвентар!", NamedTextColor.RED));
+                                }
+
+                            } catch (SQLException e) {
+                                e.printStackTrace();
+                                player.sendMessage(Component.text("Query error", NamedTextColor.RED));
+                            }
+
+                            return 1;
+                        }));
+
+        LiteralArgumentBuilder<CommandSourceStack> sendCommand = Commands.literal("send").then(sendPlayerArgument);
+
         takeCommand.then(takeWithAmountArgument);
         addCommand.then(addWithAmountArgument);
 
@@ -305,26 +396,25 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         LiteralCommandNode<CommandSourceStack> builtCommand = balanceCommandTree.build();
         LiteralCommandNode<CommandSourceStack> builtSalesCommand = salesCommand.build();
         LiteralCommandNode<CommandSourceStack> builtMarketCommand = marketCommand.build();
+        LiteralCommandNode<CommandSourceStack> builtSendCommand = sendCommand.build();
+
+//        Orders ordersBuilder = new Orders(this, connection, ITEMS_PER_PAGE);
+//        LiteralCommandNode<CommandSourceStack> builtOrdersCommand = ordersBuilder.buildOrdersCommand();
+//        LiteralCommandNode<CommandSourceStack> builtOrderCommand = ordersBuilder.buildOrderCommand();
+//
+//        OrdersListener ordersListener = new OrdersListener(this, connection, ordersBuilder, ORDERS_TITLE);
+//        Bukkit.getPluginManager().registerEvents(ordersListener, this);
 
         this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
             commands.registrar().register(builtCommand);
             commands.registrar().register(builtSalesCommand);
             commands.registrar().register(builtMarketCommand);
+            commands.registrar().register(builtSendCommand);
+//            commands.registrar().register(builtOrderCommand);
+//            commands.registrar().register(builtOrdersCommand);
         });
 
         getCommand("sell").setExecutor(this);
-
-        try {
-            File dbFile = new File(getDataFolder(), "market.db");
-            if (!getDataFolder().exists()) getDataFolder().mkdirs();
-            connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
-            try (Statement stmt = connection.createStatement()) {
-                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, item BLOB, seller TEXT, price INTEGER)");
-                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balance (player VARCHAR(32) PRIMARY KEY, amount INT NOT NULL)");
-            }
-        } catch (SQLException e) {
-            getLogger().log(Level.SEVERE, "Не вдалося підключитись до бази даних", e);
-        }
     }
 
     @Override
