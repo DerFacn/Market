@@ -58,10 +58,13 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             try (Statement stmt = connection.createStatement()) {
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, item BLOB, seller TEXT, price INTEGER)");
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balance (player VARCHAR(32) PRIMARY KEY, amount INT NOT NULL)");
-                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (" +
-                        "id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT, item TEXT, " +
-                        "count INTEGER, price INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, days INTEGER)");
-                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS deliveries (customer VARCHAR(32) PRIMARY KEY, deliverer TEXT, item TEXT, count INTEGER)");
+//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (" +
+//                        "id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT, item TEXT, " +
+//                        "count INTEGER, price INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, days INTEGER)");
+//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS deliveries (customer VARCHAR(32) PRIMARY KEY, deliverer TEXT, item TEXT, count INTEGER)");
+//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balanceHistory (" +
+//                        "id INTEGER PRIMARY KEY AUTOINCREMENT, player VARCHAR(32) PRIMARY KEY, " +
+//                        "message TEXT, date DATETIME DEFAULT CURRENT_TIMESTAMP)");
             }
         } catch (SQLException e) {
             getLogger().log(Level.SEVERE, "Не вдалося підключитись до бази даних", e);
@@ -637,7 +640,16 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                             );
 
                             player.closeInventory();
-                            openMarketGUI(player, player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0);
+                            int pageNumber = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
+
+                            getLogger().info(meta.getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING));
+
+                            if (meta.getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
+                                String playerName = meta.getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
+                                openMarketGUI(player, pageNumber, playerName);
+                            } else {
+                                openMarketGUI(player, pageNumber);
+                            }
                         }
                     } else {
                        player.sendMessage(plain("Недостатньо ізумрудів", NamedTextColor.RED));
@@ -706,6 +718,8 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             }
             ResultSet rs = stmt.executeQuery();
 
+            NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
+
             while (rs.next()) {
                 int id = rs.getInt("id");
                 byte[] data = rs.getBytes("item");
@@ -717,6 +731,9 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
                 NamespacedKey key = new NamespacedKey(this, "market_id");
                 meta.getPersistentDataContainer().set(key, PersistentDataType.INTEGER, id);
+                if (playerName != null) {
+                    meta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+                }
 
                 meta.lore(List.of(
                         plain("Ціна: " + price + " ізумрудів", NamedTextColor.YELLOW),
@@ -765,7 +782,6 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
 
             // Pagination buttons
             NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
-            NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
             NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
 
             if (page > 0) {
@@ -991,6 +1007,25 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             }
         }
     }
+
+//    public void logBalanceHistory(Player player, String message) {
+//        String playerName = player.getName().toLowerCase();
+//
+//        try {
+//            PreparedStatement stmt = connection.prepareStatement(
+//                    "DELETE FROM balanceHistory " +
+//                            "WHERE id NOT IN (SELECT id FROM  ORDER BY created_at DESC LIMIT 100)"
+//            );
+//
+//            PreparedStatement stmt = connection.prepareStatement("INSERT INTO balanceHistory (player, message) VALUES (?, ?)");
+//            stmt.setString(1, playerName);
+//            stmt.setString(2, message);
+//            stmt.executeUpdate();
+//        } catch (SQLException e) {
+//            e.printStackTrace();
+//            player.sendMessage(Component.text("Logging query failed. Contact admin, please!", NamedTextColor.RED));
+//        }
+//    }
 
     public record MarketItem(int id, ItemStack item, String seller, int price) {}
 
