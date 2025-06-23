@@ -497,13 +497,20 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         String playerName = event.getPlayer().getName().toLowerCase();
 
         try {
-            PreparedStatement stmt = connection.prepareStatement("INSERT INTO balance (player, amount) " +
-                    "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM balance WHERE player = ?)");
-            stmt.setString(1, playerName);
-            stmt.setInt(2, 0);
-            stmt.setString(3, playerName);
-            stmt.executeUpdate();
-            stmt.close();
+            PreparedStatement stmt1 = connection.prepareStatement("SELECT player FROM balance WHERE player = ?");
+            stmt1.setString(1, playerName);
+            ResultSet rs = stmt1.executeQuery();
+
+            if (!rs.next()) { // якщо НЕ знайдено — додаємо
+                PreparedStatement stmt = connection.prepareStatement("INSERT INTO balance (player, amount) VALUES (?, ?)");
+                stmt.setString(1, playerName);
+                stmt.setInt(2, 0);
+                stmt.executeUpdate();
+                stmt.close();
+            }
+
+            rs.close();
+            stmt1.close();
         } catch (SQLException e) {
             e.printStackTrace();
         }
