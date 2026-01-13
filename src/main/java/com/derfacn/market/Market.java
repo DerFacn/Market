@@ -714,12 +714,12 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             List<MarketItem> marketItems = new ArrayList<>();
             PreparedStatement stmt;
             if (playerName != null) {
-                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items WHERE seller = ? LIMIT ? OFFSET ?");
+                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items WHERE seller = ? ORDER BY id DESC LIMIT ? OFFSET ?");
                 stmt.setString(1, playerName);
                 stmt.setInt(2, ITEMS_PER_PAGE);
                 stmt.setInt(3, page * ITEMS_PER_PAGE);
             } else {
-                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items LIMIT ? OFFSET ?");
+                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items ORDER BY id DESC LIMIT ? OFFSET ?");
                 stmt.setInt(1, ITEMS_PER_PAGE);
                 stmt.setInt(2, page * ITEMS_PER_PAGE);
             }
