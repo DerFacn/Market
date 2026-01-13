@@ -1,7 +1,5 @@
 package com.derfacn.market;
 
-//import com.derfacn.market.orders.Orders;
-//import com.derfacn.market.orders.OrdersListener;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -9,6 +7,7 @@ import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
+import io.papermc.paper.command.brigadier.argument.ArgumentTypes;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -34,6 +33,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.naming.Name;
+import javax.xml.stream.events.Namespace;
 import java.io.File;
 import java.io.IOException;
 import java.sql.*;
@@ -58,13 +59,6 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             try (Statement stmt = connection.createStatement()) {
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, item BLOB, seller TEXT, price INTEGER)");
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balance (player VARCHAR(32) PRIMARY KEY, amount INT NOT NULL)");
-//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS orders (" +
-//                        "id INTEGER PRIMARY KEY AUTOINCREMENT, customer TEXT, item TEXT, " +
-//                        "count INTEGER, price INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, days INTEGER)");
-//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS deliveries (customer VARCHAR(32) PRIMARY KEY, deliverer TEXT, item TEXT, count INTEGER)");
-//                stmt.executeUpdate("CREATE TABLE IF NOT EXISTS balanceHistory (" +
-//                        "id INTEGER PRIMARY KEY AUTOINCREMENT, player VARCHAR(32) PRIMARY KEY, " +
-//                        "message TEXT, date DATETIME DEFAULT CURRENT_TIMESTAMP)");
             }
         } catch (SQLException e) {
             getLogger().log(Level.SEVERE, "Не вдалося підключитись до бази даних", e);
@@ -99,11 +93,14 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                             sellers.add(rs.getString("seller"));
                         }
 
-                        for (String seller : sellers) {
-                            builder.suggest(seller);
-                        }
+                        sellers.add("all");
+
                         rs.close();
                         stmt.close();
+
+                        sellers.stream()
+                                .filter(entry -> entry.toLowerCase().startsWith(builder.getRemainingLowerCase()))
+                                .forEach(builder::suggest);
                     } catch (SQLException e) {
                         e.printStackTrace();
                     }
@@ -113,7 +110,28 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     CommandSender sender = ctx.getSource().getSender();
                     if (!(sender instanceof Player player)) return 0;
                     String playerName = ctx.getArgument("playerName", String.class);
-                    openMarketGUI(player, 0, playerName);
+
+                    if (Objects.equals(playerName, "all")) {
+                        openMarketGUI(player, 0);
+                    } else {
+                        openMarketGUI(player, 0, playerName);
+                    }
+                    return 1;
+                });
+
+        RequiredArgumentBuilder<CommandSourceStack, ItemStack> marketItemArgument = Commands.argument("item", ArgumentTypes.itemStack())
+                .executes(ctx -> {
+                    CommandSender sender = ctx.getSource().getSender();
+                    if (!(sender instanceof Player player)) return 0;
+                    final String playerName = ctx.getArgument("playerName", String.class);
+                    final ItemStack item = ctx.getArgument("item", ItemStack.class);
+
+                    if (Objects.equals(playerName, "all")) {
+                        openMarketGUI(player, 0, null, item);
+                    } else {
+                        openMarketGUI(player, 0, playerName, item);
+                    }
+
                     return 1;
                 });
 
@@ -414,6 +432,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         balanceCommandTree.then(addCommand);
         balanceCommandTree.then(takeCommand);
 
+        marketPlayerArgument.then(marketItemArgument);
         marketCommand.then(marketPlayerArgument);
 
         LiteralCommandNode<CommandSourceStack> builtCommand = balanceCommandTree.build();
@@ -421,20 +440,11 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         LiteralCommandNode<CommandSourceStack> builtMarketCommand = marketCommand.build();
         LiteralCommandNode<CommandSourceStack> builtSendCommand = sendCommand.build();
 
-//        Orders ordersBuilder = new Orders(this, connection, ITEMS_PER_PAGE);
-//        LiteralCommandNode<CommandSourceStack> builtOrdersCommand = ordersBuilder.buildOrdersCommand();
-//        LiteralCommandNode<CommandSourceStack> builtOrderCommand = ordersBuilder.buildOrderCommand();
-//
-//        OrdersListener ordersListener = new OrdersListener(this, connection, ordersBuilder, ORDERS_TITLE);
-//        Bukkit.getPluginManager().registerEvents(ordersListener, this);
-
         this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
             commands.registrar().register(builtCommand);
             commands.registrar().register(builtSalesCommand);
             commands.registrar().register(builtMarketCommand);
             commands.registrar().register(builtSendCommand);
-//            commands.registrar().register(builtOrderCommand);
-//            commands.registrar().register(builtOrdersCommand);
         });
 
         getCommand("sell").setExecutor(this);
@@ -534,35 +544,47 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
         NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
         NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
+        NamespacedKey materialKey = new NamespacedKey(this, "materialKey");
 
         // Pages buttons
         if (clicked.getItemMeta().getPersistentDataContainer().has(pageKey, PersistentDataType.STRING)) {
-            if (Objects.equals(clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING), "previousPage")) {
+            String pageAction = clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING);
+            int currentPage = player.hasMetadata(isMarket ? "market_page" : "sales_page")
+                    ? player.getMetadata(isMarket ? "market_page" : "sales_page").get(0).asInt()
+                    : 0;
+
+            if ("previousPage".equals(pageAction)) {
                 if (isMarket) {
-                    int currentPage = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
+                    String playerName = null;
+                    ItemStack material = null;
+
                     if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
-                        String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
-                        openMarketGUI(player, currentPage - 1, playerName);
-                    } else {
-                        openMarketGUI(player, currentPage - 1);
+                        playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
                     }
-                }
-                else {
-                    int currentPage = player.hasMetadata("sales_page") ? player.getMetadata("sales_page").get(0).asInt() : 0;
+                    if (clicked.getItemMeta().getPersistentDataContainer().has(materialKey, PersistentDataType.STRING)) {
+                        String matId = clicked.getItemMeta().getPersistentDataContainer().get(materialKey, PersistentDataType.STRING);
+                        material = new ItemStack(Material.matchMaterial(matId)); // відновлюємо предмет по id
+                    }
+
+                    openMarketGUI(player, currentPage - 1, playerName, material);
+                } else {
                     openSalesGUI(player, currentPage - 1);
                 }
-            } else if (Objects.equals(clicked.getItemMeta().getPersistentDataContainer().get(pageKey, PersistentDataType.STRING), "nextPage")) {
+            } else if ("nextPage".equals(pageAction)) {
                 if (isMarket) {
-                    int currentPage = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
+                    String playerName = null;
+                    ItemStack material = null;
+
                     if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
-                        String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
-                        openMarketGUI(player, currentPage + 1, playerName);
-                    } else {
-                        openMarketGUI(player, currentPage + 1);
+                        playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
                     }
-                }
-                else {
-                    int currentPage = player.hasMetadata("sales_page") ? player.getMetadata("sales_page").get(0).asInt() : 0;
+                    if (clicked.getItemMeta().getPersistentDataContainer().has(materialKey, PersistentDataType.STRING)) {
+                        String matId = clicked.getItemMeta().getPersistentDataContainer().get(materialKey, PersistentDataType.STRING);
+                        material = new ItemStack(Material.matchMaterial(matId));
+                    }
+
+                    openMarketGUI(player, currentPage + 1, playerName, material);
+                } else {
                     openSalesGUI(player, currentPage + 1);
                 }
             }
@@ -572,14 +594,22 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         // Refresh button
         if (clicked.getItemMeta().getPersistentDataContainer().has(refreshKey, PersistentDataType.STRING)) {
             int page = player.hasMetadata("market_page") ? player.getMetadata("market_page").get(0).asInt() : 0;
+
+            String playerName = null;
+            ItemStack material = null;
+
             if (clicked.getItemMeta().getPersistentDataContainer().has(playerNameKey, PersistentDataType.STRING)) {
-                String playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
-                openMarketGUI(player, page, playerName);
-            } else {
-                openMarketGUI(player, page);
+                playerName = clicked.getItemMeta().getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING);
             }
+            if (clicked.getItemMeta().getPersistentDataContainer().has(materialKey, PersistentDataType.STRING)) {
+                String matId = clicked.getItemMeta().getPersistentDataContainer().get(materialKey, PersistentDataType.STRING);
+                material = new ItemStack(Material.matchMaterial(matId));
+            }
+
+            openMarketGUI(player, page, playerName, material);
             return;
         }
+
 
         ItemMeta meta = clicked.getItemMeta();
         if (meta == null) return;
@@ -706,23 +736,55 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
     }
 
     public void openMarketGUI(Player player, int page) {
-        openMarketGUI(player, page, null);
+        openMarketGUI(player, page, null, null);
     }
 
-    public void openMarketGUI(@NotNull Player player, int page, @Nullable String playerName) {
+    public void openMarketGUI(Player player, int page, ItemStack item) {
+        openMarketGUI(player, page, null, item);
+    }
+
+    public void openMarketGUI(Player player, int page, String playerName) {
+        openMarketGUI(player, page, playerName, null);
+    }
+
+    public void openMarketGUI(@NotNull Player player, int page, @Nullable String playerName, @Nullable ItemStack material) {
         try {
             List<MarketItem> marketItems = new ArrayList<>();
-            PreparedStatement stmt;
+
+            StringBuilder sql = new StringBuilder(
+                    "SELECT id, item, seller, price FROM items WHERE 1=1"
+            );
+
+            // Params set
+            List<Object> params = new ArrayList<>();
+
             if (playerName != null) {
-                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items WHERE seller = ? ORDER BY id DESC LIMIT ? OFFSET ?");
-                stmt.setString(1, playerName);
-                stmt.setInt(2, ITEMS_PER_PAGE);
-                stmt.setInt(3, page * ITEMS_PER_PAGE);
-            } else {
-                stmt = connection.prepareStatement("SELECT id, item, seller, price FROM items ORDER BY id DESC LIMIT ? OFFSET ?");
-                stmt.setInt(1, ITEMS_PER_PAGE);
-                stmt.setInt(2, page * ITEMS_PER_PAGE);
+                sql.append(" AND seller = ?");
+                params.add(playerName);
             }
+
+            if (material != null) {
+                sql.append(" AND item LIKE ?");
+                Material mat = material.getType();
+                String mat_id = mat.getKey().toString();
+                params.add("%" + mat_id + "%");
+            }
+
+            sql.append(" ORDER BY id DESC LIMIT ? OFFSET ?");
+            params.add(ITEMS_PER_PAGE);
+            params.add(page * ITEMS_PER_PAGE);
+
+            PreparedStatement stmt = connection.prepareStatement(sql.toString());
+
+            for (int i = 0; i < params.size(); i++) {
+                Object param = params.get(i);
+                if (param instanceof String) {
+                    stmt.setString(i + 1, (String) param);
+                } else if (param instanceof Integer) {
+                    stmt.setInt(i + 1, (Integer) param);
+                }
+            }
+
             ResultSet rs = stmt.executeQuery();
 
             NamespacedKey playerNameKey = new NamespacedKey(this, "playerNameKey");
@@ -755,22 +817,38 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             int currentPage = page + 1;
             int totalPages = 1;
 
-            PreparedStatement countStmt;
+            StringBuilder countSql = new StringBuilder(
+                    "SELECT CEIL(COUNT(*) * 1.0 / ?) AS total_pages FROM items WHERE 1=1"
+            );
+
+            List<Object> countParams = new ArrayList<>();
+            countParams.add(ITEMS_PER_PAGE);
+
             if (playerName != null) {
-                 countStmt = connection.prepareStatement(
-                         "SELECT CEIL(COUNT(*) / ?) AS total_pages FROM items WHERE seller = ?"
-                 );
-                 countStmt.setDouble(1, ITEMS_PER_PAGE);
-                 countStmt.setString(2, playerName);
-            } else {
-                countStmt = connection.prepareStatement(
-                        "SELECT CEIL(COUNT(*) / ?) AS total_pages FROM items"
-                );
-                countStmt.setDouble(1, ITEMS_PER_PAGE);
+                countSql.append(" AND seller = ?");
+                countParams.add(playerName);
+            }
+
+            if (material != null) {
+                countSql.append(" AND item LIKE ?");
+                Material mat = material.getType();
+                String mat_id = mat.getKey().toString();
+                countParams.add("%" + mat_id + "%");
+            }
+
+            PreparedStatement countStmt = connection.prepareStatement(countSql.toString());
+
+            // сетимо параметри
+            for (int i = 0; i < countParams.size(); i++) {
+                Object param = countParams.get(i);
+                if (param instanceof String) {
+                    countStmt.setString(i + 1, (String) param);
+                } else if (param instanceof Integer) {
+                    countStmt.setInt(i + 1, (Integer) param);
+                }
             }
 
             ResultSet countRs = countStmt.executeQuery();
-
             if (countRs.next()) {
                 totalPages = countRs.getInt("total_pages");
             }
@@ -790,15 +868,18 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             // Pagination buttons
             NamespacedKey pageKey = new NamespacedKey(this, "pageKey");
             NamespacedKey refreshKey = new NamespacedKey(this, "refreshKey");
+            NamespacedKey materialKey = new NamespacedKey(this, "materialKey");
 
             if (page > 0) {
                 ItemStack back = new ItemStack(Material.PAPER);
-
                 ItemMeta meta = back.getItemMeta();
                 meta.displayName(plain("Попередня сторінка", NamedTextColor.YELLOW));
                 meta.getPersistentDataContainer().set(pageKey, PersistentDataType.STRING, "previousPage");
                 if (playerName != null) {
                     meta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+                }
+                if (material != null) {
+                    meta.getPersistentDataContainer().set(materialKey, PersistentDataType.STRING, material.getType().getKey().toString());
                 }
                 meta.addEnchant(Enchantment.UNBREAKING, 1, true);
                 meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
@@ -814,6 +895,9 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                 if (playerName != null) {
                     meta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
                 }
+                if (material != null) {
+                    meta.getPersistentDataContainer().set(materialKey, PersistentDataType.STRING, material.getType().getKey().toString());
+                }
                 meta.addEnchant(Enchantment.UNBREAKING, 1, true);
                 meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
                 next.setItemMeta(meta);
@@ -826,6 +910,9 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             refreshMeta.getPersistentDataContainer().set(refreshKey, PersistentDataType.STRING, "refreshKey");
             if (playerName != null) {
                 refreshMeta.getPersistentDataContainer().set(playerNameKey, PersistentDataType.STRING, playerName);
+            }
+            if (material != null) {
+                refreshMeta.getPersistentDataContainer().set(materialKey, PersistentDataType.STRING, material.getType().getKey().toString());
             }
             refreshMeta.addEnchant(Enchantment.UNBREAKING, 1, true);
             refreshMeta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
@@ -1014,25 +1101,6 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             }
         }
     }
-
-//    public void logBalanceHistory(Player player, String message) {
-//        String playerName = player.getName().toLowerCase();
-//
-//        try {
-//            PreparedStatement stmt = connection.prepareStatement(
-//                    "DELETE FROM balanceHistory " +
-//                            "WHERE id NOT IN (SELECT id FROM  ORDER BY created_at DESC LIMIT 100)"
-//            );
-//
-//            PreparedStatement stmt = connection.prepareStatement("INSERT INTO balanceHistory (player, message) VALUES (?, ?)");
-//            stmt.setString(1, playerName);
-//            stmt.setString(2, message);
-//            stmt.executeUpdate();
-//        } catch (SQLException e) {
-//            e.printStackTrace();
-//            player.sendMessage(Component.text("Logging query failed. Contact admin, please!", NamedTextColor.RED));
-//        }
-//    }
 
     public record MarketItem(int id, ItemStack item, String seller, int price) {}
 
