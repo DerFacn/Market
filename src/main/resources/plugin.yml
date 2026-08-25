@@ -18,3 +18,15 @@ commands:
   send:
     description: Надіслати ізумруди
     usage: /send <playerName> <amount>
+  order:
+    description: Зробити замовлення
+    usage: /order <item> <count> <price> <days>
+  orders:
+    description: Переглянути активні замовлення
+    usage: /orders
+  myorders:
+    description: Зняти свої замовлення
+    usage: /myorders
+  depot:
+    description: Склад
+    usage: /depot
