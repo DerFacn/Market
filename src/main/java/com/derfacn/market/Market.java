@@ -41,6 +41,7 @@ import java.util.*;
 import java.util.logging.Level;
 
 public class Market extends JavaPlugin implements Listener, TabExecutor {
+    private TelegramAPI telegramAPI;
     private Connection connection;
     private static final int ITEMS_PER_PAGE = 45;
 
@@ -61,6 +62,14 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         initKeys();
         getServer().getPluginManager().registerEvents(this, this);
         initDatabase();
+
+        saveDefaultConfig();
+        String apiKey = getConfig().getString("api_key", "SuperSecretKey123");
+        int apiPort = getConfig().getInt("api_port", 8500);
+
+        telegramAPI = new TelegramAPI(this, connection, apiKey, apiPort);
+        telegramAPI.init();
+
         registerCommands();
         Objects.requireNonNull(getCommand("sell")).setExecutor(this);
         // Запускаємо фонову перевірку: старт через 1 хвилину (1200 тіків), повтор кожну годину (72000 тіків)
@@ -88,6 +97,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         } catch (SQLException e) {
             getLogger().log(Level.SEVERE, "Помилка при закритті БД", e);
         }
+        if (telegramAPI != null) telegramAPI.stop();
     }
 
     private void initDatabase() {
@@ -346,6 +356,21 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                                                     return 1;
                                                 })))));
 
+        LiteralArgumentBuilder<CommandSourceStack> tgCommand = Commands.literal("tg")
+                .then(Commands.literal("link")
+                        .executes(ctx -> {
+                            if (!(ctx.getSource().getSender() instanceof Player player)) return 0;
+                            String code = telegramAPI.generateLinkCode(player.getUniqueId().toString());
+                            if (code != null) {
+                                player.sendMessage(Component.text("Ваш код для Telegram: ", NamedTextColor.YELLOW)
+                                        .append(Component.text(code, NamedTextColor.GREEN, TextDecoration.BOLD))
+                                        .append(Component.text(" (Діє 5 хвилин). Надішліть боту команду /link " + code, NamedTextColor.YELLOW)));
+                            } else {
+                                player.sendMessage(Component.text("Помилка генерації коду.", NamedTextColor.RED));
+                            }
+                            return 1;
+                        }));
+
         takeCommand.then(takeWithAmountArgument);
         addCommand.then(addWithAmountArgument);
         balanceCommandTree.then(addCommand);
@@ -362,6 +387,7 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             commands.registrar().register(myOrdersCommand.build());
             commands.registrar().register(depotCommand.build());
             commands.registrar().register(orderCommand.build());
+            commands.registrar().register(tgCommand.build());
         });
     }
 
