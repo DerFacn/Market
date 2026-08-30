@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -13,7 +14,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.sql.*;
-import java.util.UUID;
 import java.util.logging.Level;
 
 public class TelegramAPI {
@@ -37,6 +37,11 @@ public class TelegramAPI {
             try (Statement stmt = tgDb.createStatement()) {
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS linked_accounts (telegram_id BIGINT PRIMARY KEY, uuid VARCHAR(36))");
                 stmt.executeUpdate("CREATE TABLE IF NOT EXISTS link_codes (code VARCHAR(6) PRIMARY KEY, uuid VARCHAR(36), expires BIGINT)");
+
+                // Додаємо колонки для налаштувань, якщо їх ще немає
+                try { stmt.executeUpdate("ALTER TABLE linked_accounts ADD COLUMN notify_orders BOOLEAN DEFAULT 0"); } catch (SQLException ignored) {}
+                try { stmt.executeUpdate("ALTER TABLE linked_accounts ADD COLUMN notify_market BOOLEAN DEFAULT 0"); } catch (SQLException ignored) {}
+                try { stmt.executeUpdate("ALTER TABLE linked_accounts ADD COLUMN notify_transfers BOOLEAN DEFAULT 0"); } catch (SQLException ignored) {}
             }
 
             server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -49,6 +54,10 @@ public class TelegramAPI {
             server.createContext("/api/order", this::handlePlaceOrder);
             server.createContext("/api/cancel", this::handleCancelOrder);
             server.createContext("/api/send", this::handleSend);
+            server.createContext("/api/settings", this::handleSettings);
+            server.createContext("/api/settings/toggle", this::handleSettingsToggle);
+            server.createContext("/api/depot", this::handleDepot);
+            server.createContext("/api/depot/claim", this::handleDepotClaim);
 
             server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
             server.start();
@@ -63,18 +72,51 @@ public class TelegramAPI {
         try { if (tgDb != null) tgDb.close(); } catch (SQLException ignored) {}
     }
 
+    // --- Метод для надсилання Webhook сповіщень ---
+    public void sendNotification(String uuid, String type, String message) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try (PreparedStatement stmt = tgDb.prepareStatement("SELECT telegram_id, notify_orders, notify_market, notify_transfers FROM linked_accounts WHERE uuid = ?")) {
+                stmt.setString(1, uuid);
+                ResultSet rs = stmt.executeQuery();
+                if (rs.next()) {
+                    long tgId = rs.getLong("telegram_id");
+                    boolean notify = false;
+                    switch(type) {
+                        case "order": notify = rs.getBoolean("notify_orders"); break;
+                        case "market": notify = rs.getBoolean("notify_market"); break;
+                        case "transfer": notify = rs.getBoolean("notify_transfers"); break;
+                    }
+                    if (notify) {
+                        String webhookUrl = plugin.getConfig().getString("bot_webhook_url", "http://127.0.0.1:8081/notify");
+                        java.net.URL url = new java.net.URL(webhookUrl);
+                        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                        conn.setRequestMethod("POST");
+                        conn.setRequestProperty("Content-Type", "application/json");
+                        conn.setDoOutput(true);
+
+                        JsonObject payload = new JsonObject();
+                        payload.addProperty("telegram_id", tgId);
+                        payload.addProperty("message", message);
+
+                        try(OutputStream os = conn.getOutputStream()) {
+                            byte[] input = payload.toString().getBytes("utf-8");
+                            os.write(input, 0, input.length);
+                        }
+                        conn.getResponseCode();
+                    }
+                }
+            } catch (Exception ignored) { }
+        });
+    }
+
     public String generateLinkCode(String uuid) {
         String code = String.format("%06d", new java.util.Random().nextInt(999999));
-        long expires = System.currentTimeMillis() + 300000; // 5 хвилин
+        long expires = System.currentTimeMillis() + 300000;
         try (PreparedStatement stmt = tgDb.prepareStatement("INSERT INTO link_codes (code, uuid, expires) VALUES (?, ?, ?)")) {
-            stmt.setString(1, code);
-            stmt.setString(2, uuid);
-            stmt.setLong(3, expires);
+            stmt.setString(1, code); stmt.setString(2, uuid); stmt.setLong(3, expires);
             stmt.executeUpdate();
             return code;
-        } catch (SQLException e) {
-            return null;
-        }
+        } catch (SQLException e) { return null; }
     }
 
     private String getUuidByTgId(long tgId) throws SQLException {
@@ -84,6 +126,117 @@ public class TelegramAPI {
             if (rs.next()) return rs.getString("uuid");
         }
         return null;
+    }
+
+    // --- HTTP HANDLERS ---
+
+    private void handleSettings(HttpExchange exchange) {
+        if (!checkAuth(exchange)) return;
+        try {
+            long tgId = Long.parseLong(getQueryParam(exchange.getRequestURI().getQuery(), "tg_id"));
+            try (PreparedStatement stmt = tgDb.prepareStatement("SELECT notify_orders, notify_market, notify_transfers FROM linked_accounts WHERE telegram_id = ?")) {
+                stmt.setLong(1, tgId);
+                ResultSet rs = stmt.executeQuery();
+                if (rs.next()) {
+                    JsonObject obj = new JsonObject();
+                    obj.addProperty("notify_orders", rs.getBoolean("notify_orders"));
+                    obj.addProperty("notify_market", rs.getBoolean("notify_market"));
+                    obj.addProperty("notify_transfers", rs.getBoolean("notify_transfers"));
+                    sendResponse(exchange, 200, obj.toString());
+                } else {
+                    sendResponse(exchange, 403, "{\"error\":\"not_linked\"}");
+                }
+            }
+        } catch (Exception e) { sendResponse(exchange, 500, "{\"error\":\"server error\"}"); }
+    }
+
+    private void handleSettingsToggle(HttpExchange exchange) {
+        if (!checkAuth(exchange)) return;
+        try {
+            JsonObject req = JsonParser.parseReader(new InputStreamReader(exchange.getRequestBody())).getAsJsonObject();
+            long tgId = req.get("telegram_id").getAsLong();
+            String setting = req.get("setting").getAsString();
+
+            String col = "";
+            if (setting.equals("orders")) col = "notify_orders";
+            else if (setting.equals("market")) col = "notify_market";
+            else if (setting.equals("transfers")) col = "notify_transfers";
+            else { sendResponse(exchange, 400, "{\"success\":false}"); return; }
+
+            try (PreparedStatement stmt = tgDb.prepareStatement("UPDATE linked_accounts SET " + col + " = NOT " + col + " WHERE telegram_id = ?")) {
+                stmt.setLong(1, tgId);
+                stmt.executeUpdate();
+                sendResponse(exchange, 200, "{\"success\":true}");
+            }
+        } catch (Exception e) { sendResponse(exchange, 500, "{\"error\":\"server error\"}"); }
+    }
+
+    private void handleDepot(HttpExchange exchange) {
+        if (!checkAuth(exchange)) return;
+        try {
+            long tgId = Long.parseLong(getQueryParam(exchange.getRequestURI().getQuery(), "tg_id"));
+            String uuid = getUuidByTgId(tgId);
+            if (uuid == null) { sendResponse(exchange, 403, "{\"error\":\"not_linked\"}"); return; }
+
+            int page = 0;
+            String pageStr = getQueryParam(exchange.getRequestURI().getQuery(), "page");
+            if (pageStr != null) page = Integer.parseInt(pageStr);
+
+            try (PreparedStatement stmt = marketDb.prepareStatement("SELECT id, fulfiller_name, item, is_refund, emerald_amount FROM completed_orders WHERE owner_uuid = ? ORDER BY timestamp DESC LIMIT 40 OFFSET ?")) {
+                stmt.setString(1, uuid);
+                stmt.setInt(2, page * 40);
+                ResultSet rs = stmt.executeQuery();
+                JsonArray arr = new JsonArray();
+                while (rs.next()) {
+                    JsonObject obj = new JsonObject();
+                    obj.addProperty("id", rs.getInt("id"));
+                    obj.addProperty("fulfiller", rs.getString("fulfiller_name"));
+                    boolean isRefund = rs.getBoolean("is_refund");
+                    obj.addProperty("is_refund", isRefund);
+                    if (isRefund) {
+                        obj.addProperty("item", "Ізумруди");
+                        obj.addProperty("amount", rs.getInt("emerald_amount"));
+                    } else {
+                        ItemStack item = BukkitObjectSerializer.bytesToItemStack(rs.getBytes("item"));
+                        obj.addProperty("item", item.getType().name() + " x" + item.getAmount());
+                    }
+                    arr.add(obj);
+                }
+                sendResponse(exchange, 200, arr.toString());
+            }
+        } catch (Exception e) { sendResponse(exchange, 500, "{\"error\":\"server error\"}"); }
+    }
+
+    private void handleDepotClaim(HttpExchange exchange) {
+        if (!checkAuth(exchange)) return;
+        try {
+            JsonObject req = JsonParser.parseReader(new InputStreamReader(exchange.getRequestBody())).getAsJsonObject();
+            String uuid = getUuidByTgId(req.get("telegram_id").getAsLong());
+            if (uuid == null) { sendResponse(exchange, 403, "{\"error\":\"not_linked\"}"); return; }
+            int depotId = req.get("depot_id").getAsInt();
+
+            try (PreparedStatement stmt = marketDb.prepareStatement("SELECT is_refund, emerald_amount FROM completed_orders WHERE id = ? AND owner_uuid = ?")) {
+                stmt.setInt(1, depotId);
+                stmt.setString(2, uuid);
+                ResultSet rs = stmt.executeQuery();
+                if (rs.next()) {
+                    if (rs.getBoolean("is_refund")) {
+                        int amount = rs.getInt("emerald_amount");
+                        try (PreparedStatement update = marketDb.prepareStatement("UPDATE balance SET amount = amount + ? WHERE uuid = ?")) {
+                            update.setInt(1, amount); update.setString(2, uuid); update.executeUpdate();
+                        }
+                        try (PreparedStatement del = marketDb.prepareStatement("DELETE FROM completed_orders WHERE id = ?")) {
+                            del.setInt(1, depotId); del.executeUpdate();
+                        }
+                        sendResponse(exchange, 200, "{\"success\":true, \"message\":\"Ізумруди зараховано на баланс!\"}");
+                    } else {
+                        sendResponse(exchange, 400, "{\"success\":false, \"message\":\"Предмети можна забрати лише у грі!\"}");
+                    }
+                } else {
+                    sendResponse(exchange, 400, "{\"success\":false, \"message\":\"Запис не знайдено.\"}");
+                }
+            }
+        } catch (Exception e) { sendResponse(exchange, 500, "{\"error\":\"server error\"}"); }
     }
 
     // --- HTTP HANDLERS ---
@@ -296,18 +449,20 @@ public class TelegramAPI {
             String target = req.get("target_name").getAsString().toLowerCase();
             int amount = req.get("amount").getAsInt();
 
-            try (PreparedStatement check = marketDb.prepareStatement("SELECT amount FROM balance WHERE uuid = ?")) {
+            try (PreparedStatement check = marketDb.prepareStatement("SELECT amount, player FROM balance WHERE uuid = ?")) {
                 check.setString(1, uuid);
                 ResultSet rs = check.executeQuery();
                 if (rs.next() && rs.getInt("amount") >= amount) {
-                    // Перевіряємо чи існує ціль
+                    String senderName = rs.getString("player");
+
+                    String targetUuid = null;
                     try (PreparedStatement checkTgt = marketDb.prepareStatement("SELECT uuid FROM balance WHERE player = ?")) {
                         checkTgt.setString(1, target);
-                        if (!checkTgt.executeQuery().next()) {
-                            sendResponse(exchange, 400, "{\"success\":false, \"message\":\"Гравця не знайдено в базі!\"}"); return;
-                        }
+                        ResultSet rst = checkTgt.executeQuery();
+                        if (rst.next()) targetUuid = rst.getString("uuid");
+                        else { sendResponse(exchange, 400, "{\"success\":false, \"message\":\"Гравця не знайдено в базі!\"}"); return; }
                     }
-                    // Віднімаємо і додаємо
+
                     try (PreparedStatement sub = marketDb.prepareStatement("UPDATE balance SET amount = amount - ? WHERE uuid = ?")) {
                         sub.setInt(1, amount); sub.setString(2, uuid); sub.executeUpdate();
                     }
@@ -315,6 +470,10 @@ public class TelegramAPI {
                         add.setInt(1, amount); add.setString(2, target); add.executeUpdate();
                     }
                     sendResponse(exchange, 200, "{\"success\":true, \"message\":\"Успішно надіслано!\"}");
+
+                    if (targetUuid != null) {
+                        sendNotification(targetUuid, "transfer", "💸 Вам було передано <b>" + amount + "</b> ізумрудів гравцем <b>" + senderName + "</b>!");
+                    }
                 } else {
                     sendResponse(exchange, 400, "{\"success\":false, \"message\":\"Недостатньо коштів на балансі!\"}");
                 }
@@ -336,12 +495,8 @@ public class TelegramAPI {
             byte[] bytes = response.getBytes("UTF-8");
             exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
             exchange.sendResponseHeaders(code, bytes.length);
-            try (OutputStream os = exchange.getResponseBody()) {
-                os.write(bytes);
-            }
-        } catch (Exception e) {
-            plugin.getLogger().warning("Помилка відправки відповіді API: " + e.getMessage());
-        }
+            try (OutputStream os = exchange.getResponseBody()) { os.write(bytes); }
+        } catch (Exception e) { plugin.getLogger().warning("Помилка відправки відповіді API: " + e.getMessage()); }
     }
 
     private String getQueryParam(String query, String param) {

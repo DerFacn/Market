@@ -262,6 +262,11 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                                                 .append(Component.text(amount + " ізумрудів", NamedTextColor.GOLD))
                                                 .append(Component.text("!", NamedTextColor.GREEN))
                                 );
+
+                                String targetUuid = getUuidByName(targetName);
+                                if (telegramAPI != null && targetUuid != null) {
+                                    telegramAPI.sendNotification(targetUuid, "transfer", "💸 Вам було передано <b>" + amount + "</b> ізумрудів гравцем <b>" + player.getName() + "</b>!");
+                                }
                             } else {
                                 player.sendMessage(Component.text("Недостатньо ізумрудів на балансі чи в інвентарі!", NamedTextColor.RED));
                             }
@@ -402,8 +407,8 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
             }
 
             int price = Integer.parseInt(args[0]);
-            if (price <= 0) {
-                player.sendMessage(Component.text("Ціна має бути більшою за 0!").color(NamedTextColor.RED));
+            if (price < 0) {
+                player.sendMessage(Component.text("Ціна не може бути від'ємною!").color(NamedTextColor.RED));
                 return true;
             }
 
@@ -675,10 +680,15 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                     modifyBalance(player.getUniqueId().toString(), player.getName(), price);
                     player.sendMessage(plain("Ви успішно виконали замовлення та отримали " + price + " ізумрудів!", NamedTextColor.GREEN));
 
+                    modifyBalance(player.getUniqueId().toString(), player.getName(), price);
+                    player.sendMessage(plain("Ви успішно виконали замовлення та отримали " + price + " ізумрудів!", NamedTextColor.GREEN));
+
                     Player owner = Bukkit.getPlayer(UUID.fromString(ownerUuid));
                     if (owner != null && owner.isOnline()) {
                         owner.sendMessage(plain("Ваше замовлення виконано! Заберіть предмет через /depot", NamedTextColor.GREEN));
                     }
+                    // ДОДАНО: Сповіщення ТГ
+                    if (telegramAPI != null) telegramAPI.sendNotification(ownerUuid, "order", "📦 Ваше замовлення <b>" + reqMat.name() + " x" + reqCount + "</b> було виконано гравцем <b>" + player.getName() + "</b>! Заберіть предмети у /depot в грі.");
                 } else {
                     // Недостатньо предметів - скасовуємо та повертаємо все
                     toRefund.addAll(validItems);
@@ -698,12 +708,14 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
     }
 
     private void handleMarketPurchase(Player player, ItemMeta meta, int clickedId) {
-        try (PreparedStatement stmt = connection.prepareStatement("SELECT item, price, seller FROM items WHERE id = ?")) {
+        // ЗМІНЕНО ЗАПИТ: Додано uuid
+        try (PreparedStatement stmt = connection.prepareStatement("SELECT item, price, seller, uuid FROM items WHERE id = ?")) {
             stmt.setInt(1, clickedId);
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
                     int price = rs.getInt("price");
                     String seller = rs.getString("seller");
+                    String sellerUuid = rs.getString("uuid"); // Отримуємо UUID продавця
                     ItemStack dbItem = BukkitObjectSerializer.bytesToItemStack(rs.getBytes("item"));
 
                     boolean purchaseSuccessful = withdrawBalance(player, price);
@@ -724,6 +736,11 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
                         player.sendMessage(Component.text("Ви купили предмет за " + price + " ізумрудів").color(NamedTextColor.GREEN));
                         sendMessageToPlayerByLowercaseName(seller, Component.translatable(dbItem.getType().translationKey())
                                 .append(Component.text(" було продано!")).color(NamedTextColor.GREEN).decorate(TextDecoration.ITALIC));
+
+                        // ДОДАНО: Сповіщення ТГ
+                        if (telegramAPI != null && sellerUuid != null) {
+                            telegramAPI.sendNotification(sellerUuid, "market", "🛒 Ваш товар <b>" + dbItem.getType().name() + " x" + dbItem.getAmount() + "</b> було придбано гравцем <b>" + player.getName() + "</b> за " + price + " ізумрудів!");
+                        }
 
                         openMarketGUI(player, getPageMeta(player, MARKET_TITLE), meta.getPersistentDataContainer().get(playerNameKey, PersistentDataType.STRING));
                     } else {
@@ -1188,6 +1205,16 @@ public class Market extends JavaPlugin implements Listener, TabExecutor {
         if (player != null && player.isOnline()) {
             player.sendMessage(message);
         }
+    }
+
+    public String getUuidByName(String playerName) {
+        try (PreparedStatement stmt = connection.prepareStatement("SELECT uuid FROM balance WHERE player = ? LIMIT 1")) {
+            stmt.setString(1, playerName.toLowerCase());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) return rs.getString("uuid");
+            }
+        } catch (SQLException ignored) {}
+        return null;
     }
 
     public record MarketItem(int id, ItemStack item, String seller, int price) {}

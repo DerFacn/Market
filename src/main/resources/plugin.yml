@@ -8,10 +8,10 @@ commands:
     usage: /sell <price>
   market:
     description: Відкрити маркет
-    usage: /market <playerName>
+    usage: /market <playerName|all> <itemName>
   balance:
     description: Управління балансом
-    usage: /balance <add|take>
+    usage: /balance <add|take> <number>
   sales:
     description: Передивитись виставлені предмети
     usage: /sales
